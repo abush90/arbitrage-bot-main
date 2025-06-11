@@ -1,0 +1,1335 @@
+You've presented an ambitious and comprehensive vision for your arbitrage bot, moving far beyond a basic notification system! The provided image of the "ArbifyBot" dashboard is an excellent reference for the desired UI and advanced features.
+Developing all these features from scratch is a significant undertaking, but it's entirely feasible with the right architectural approach. I'll outline how to integrate these new features into the existing structure, focusing on the UI (app.py), the backend logic (main.py, arbitrage_detector.py, connectors), and the settings (settings_manager.py).
+We'll break this down into:
+ * UI Redesign (app.py): Matching the "ArbifyBot" dashboard.
+ * New Backend Features & Logic: How to implement the advanced functionalities.
+ * Integration Points: How the UI interacts with the new backend features.
+ * Updated config.json Structure: To accommodate new settings.
+1. UI Redesign (app.py) - Towards the ArbifyBot Dashboard
+The current app.py uses tabs. To match the dashboard, we'll shift to a sidebar navigation and a more complex main content area with cards and real-time updates.
+Key UI Elements from the Image to Implement:
+ * Sidebar Navigation: "Arbitrage Monitor", "Auto Trading", "Analytics", "Portfolio", "Multi-Chain", "Settings".
+ * Header: Bot status, Total Balance, Security Status, Opportunities count.
+ * Arbitrage Intelligence Section:
+   * "24h AI Profit", "Success Rate", "Avg Spread", "AI Uptime".
+   * "Live Opportunities" table/cards with details (ETH/USDT, BTC/USDT, etc.): Buy/Sell Price, Spread, Est. Profit, Liquidity, Volume, Time Ago, Execute Button.
+ * Quick Stats Sidebar: "24h Profit", "Active Pairs", "Success Rate".
+app.py - Core Changes:
+import streamlit as st
+import logging
+import asyncio
+import threading
+import time
+from datetime import datetime, timedelta
+import pandas as pd
+from typing import Dict, List, Any
+import json
+
+from settings_manager import SettingsManager
+from utils.constants import CEX_PLATFORMS, DEX_NETWORKS, SUPPORTED_TOKENS, ARBITRAGE_TYPES
+from logger import logger, StreamlitLogHandler
+import main as bot_main # Import the main bot logic
+
+# Setup logging for Streamlit UI
+st_logger = logging.getLogger(__name__)
+st_logger.setLevel(logging.INFO)
+
+# --- Initialize Settings Manager ---
+settings_manager = SettingsManager()
+current_settings = settings_manager.get_all_settings()
+
+st.set_page_config(layout="wide", page_title="ArbifyBot - Trading Terminal", initial_sidebar_state="expanded")
+
+# --- Global UI State for refreshing (optional but good practice) ---
+if 'last_ui_update' not in st.session_state:
+    st.session_state.last_ui_update = datetime.now()
+if 'log_messages_display' not in st.session_state:
+    st.session_state.log_messages_display = []
+
+# --- Sidebar Navigation ---
+st.sidebar.image("path/to/your/bot_logo.png", use_column_width=True) # Add a logo image
+st.sidebar.title("ArbifyBot")
+st.sidebar.markdown("---")
+
+menu_items = {
+    "Arbitrage Monitor": "📈",
+    "Auto Trading": "🤖",
+    "Analytics": "📊",
+    "Portfolio": "💼",
+    "Multi-Chain": "🔗",
+    "Settings": "⚙️"
+}
+selected_page = st.sidebar.radio("Navigation", list(menu_items.keys()), format_func=lambda x: f"{menu_items[x]} {x}")
+
+# --- Header Section (Always Visible) ---
+st.markdown("""
+    <style>
+        .header-container {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 0;
+            border-bottom: 1px solid #333;
+            margin-bottom: 20px;
+        }
+        .header-item {
+            background-color: #2e2e2e;
+            padding: 10px 15px;
+            border-radius: 8px;
+            text-align: center;
+            min-width: 120px;
+            color: #eee;
+            font-size: 0.9em;
+        }
+        .header-item .value {
+            font-weight: bold;
+            font-size: 1.2em;
+            color: #4CAF50; /* Green for positive values */
+        }
+        .header-item .label {
+            font-size: 0.8em;
+            color: #bbb;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
+st.markdown(f"""
+<div class="header-container">
+    <div class="header-item">
+        <div class="label">Status</div>
+        <div class="value">{'🟢 Connected' if bot_main.get_bot_status() else '🔴 Disconnected'} to {len(current_settings.get('api_keys', {}))} exchanges</div>
+    </div>
+    <div class="header-item">
+        <div class="label">Total Balance</div>
+        <div class="value">{bot_main.get_portfolio_balance():,.2f}$</div>
+    </div>
+    <div class="header-item">
+        <div class="label">Security Status</div>
+        <div class="value">{'✅ Active' if not bot_main.get_security_alerts() else '⚠️ Alerts'}</div>
+    </div>
+    <div class="header-item">
+        <div class="label">Opportunities</div>
+        <div class="value">{len(bot_main.get_discovered_opportunities())}</div>
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+
+# --- Page Content ---
+
+if selected_page == "Arbitrage Monitor":
+    st.header("Arbitrage Intelligence")
+    st.markdown("Multi-chain arbitrage opportunities")
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric(label="24h AI Profit", value=f"${bot_main.get_24h_profit():,.2f}", delta=f"{bot_main.get_24h_profit_change():.1f}% from yesterday")
+    with col2:
+        st.metric(label="Success Rate", value=f"{bot_main.get_success_rate():.1f}%", help=f"{bot_main.get_successful_trades_count()} of {bot_main.get_total_trades_count()} trades")
+    with col3:
+        st.metric(label="Avg Spread", value=f"{bot_main.get_avg_spread():.2f}%", help=f"Above {current_settings.get('thresholds', {}).get('min_spread_percent', 0.5)}% threshold")
+    with col4:
+        st.metric(label="AI Uptime", value=bot_main.get_ai_uptime_str())
+    
+    st.markdown("---")
+
+    st.subheader("Live Opportunities")
+    
+    # Buttons for filtering
+    col_filters = st.columns(3)
+    with col_filters[0]:
+        st.checkbox("All Chains", value=True, key="filter_all_chains")
+    with col_filters[1]:
+        st.checkbox("High Risk", value=False, key="filter_high_risk")
+    # Add AI-Ranked for future advanced filtering
+    st.write(f"Found {len(bot_main.get_discovered_opportunities())} live opportunities.")
+
+    # Display Live Opportunities in a table/cards
+    opportunities_data = bot_main.get_discovered_opportunities()
+    if opportunities_data:
+        # Convert to DataFrame for better display if desired
+        df = pd.DataFrame(opportunities_data)
+        
+        # Streamlit doesn't have native "card" layout. We can simulate with columns.
+        for i, opp in enumerate(opportunities_data):
+            # Basic card-like structure using columns
+            st.markdown(f"**Opportunity {i+1}** - *{opp.get('opportunity_type')}*")
+            
+            opp_cols = st.columns([1, 1, 0.7, 0.7, 0.5, 0.5])
+            with opp_cols[0]:
+                st.markdown(f"**Asset:** {opp.get('asset')}")
+                st.markdown(f"Buy: *{opp.get('buy_platform', {}).get('name')}* ({opp.get('buy_platform', {}).get('network', 'N/A')})")
+            with opp_cols[1]:
+                st.markdown(f"**Buy Price:** {opp.get('buy_platform', {}).get('price'):,.4f}$")
+                st.markdown(f"Sell: *{opp.get('sell_platform', {}).get('name')}* ({opp.get('sell_platform', {}).get('network', 'N/A')})")
+            with opp_cols[2]:
+                st.markdown(f"**Sell Price:** {opp.get('sell_platform', {}).get('price'):,.4f}$")
+                st.markdown(f"Spread: **{opp.get('spread_percent'):.2f}%**")
+            with opp_cols[3]:
+                st.markdown(f"Est. Profit: **{opp.get('net_profit_usd'):,.2f}$**")
+                st.markdown(f"Liquidity: {opp.get('liquidity_info', {}).get('estimated_total_liquidity', 'N/A'):,.0f}$") # Placeholder for liquidity
+            with opp_cols[4]:
+                st.markdown(f"Vol: {opp.get('volume_info', {}).get('24h_volume', 'N/A')}") # Placeholder for volume
+                st.markdown(f"{opp.get('time_ago', 'N/A')} ago") # Placeholder for time
+            with opp_cols[5]:
+                if st.button("Execute", key=f"execute_opp_{i}", disabled=not bot_main.get_bot_status()):
+                    st.toast(f"Executing Opportunity {i+1} - {opp.get('asset')}...")
+                    # Trigger manual execution in main.py
+                    # This would need a specific function in main.py to handle single executions
+                    st_logger.info(f"Manual execution triggered for {opp.get('asset')}")
+            st.markdown("---")
+    else:
+        st.info("No live arbitrage opportunities found.")
+
+    # Quick Stats (left sidebar in image, simulating in main content)
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Quick Stats")
+    st.sidebar.metric("24h Profit", value=f"${bot_main.get_24h_profit():,.2f}")
+    st.sidebar.metric("Active Pairs", value=bot_main.get_active_pairs_count())
+    st.sidebar.metric("Success Rate", value=f"{bot_main.get_success_rate():.1f}%")
+
+
+elif selected_page == "Auto Trading":
+    st.header("Auto Trading Settings")
+    st.write("Configure automatic trade execution.")
+
+    # Bot Mode
+    st.subheader("Bot Mode")
+    bot_mode_options = ["Execution Enabled (Auto)", "Inactive (Manual Review)"]
+    selected_bot_mode = st.radio("Choose Bot Execution Mode:", bot_mode_options, index=0 if current_settings.get("bot_mode", "Execution Enabled") == "Execution Enabled" else 1)
+    
+    # Update settings
+    new_bot_mode = "Execution Enabled" if selected_bot_mode == "Execution Enabled (Auto)" else "Inactive"
+    if new_bot_mode != current_settings.get("bot_mode"):
+        current_settings["bot_mode"] = new_bot_mode
+        settings_manager.save_settings({"bot_mode": new_bot_mode})
+        st.success(f"Bot Mode updated to: {new_bot_mode}")
+
+    # Risk Management (Advanced)
+    st.subheader("Advanced Risk Management")
+    st.write("Define granular risk parameters for automated trading.")
+    
+    col_risk_1, col_risk_2 = st.columns(2)
+    with col_risk_1:
+        stop_loss_pct = st.number_input("Stop-Loss (%) per trade", min_value=0.0, max_value=20.0, value=current_settings.get("risk_management", {}).get("stop_loss_pct", 1.0), step=0.1)
+        take_profit_pct = st.number_input("Take-Profit (%) per trade", min_value=0.0, max_value=50.0, value=current_settings.get("risk_management", {}).get("take_profit_pct", 5.0), step=0.1)
+        capital_allocation_limit = st.number_input("Max Capital Allocation (%) per pair", min_value=1.0, max_value=100.0, value=current_settings.get("risk_management", {}).get("capital_allocation_limit_pct", 10.0), step=1.0)
+    with col_risk_2:
+        auto_pause_volatility_pct = st.number_input("Auto-Pause during volatility (Price Change % in 5 min)", min_value=0.0, max_value=20.0, value=current_settings.get("risk_management", {}).get("auto_pause_volatility_pct", 5.0), step=0.1)
+        auto_pause_volatility_window = st.number_input("Volatility Window (minutes)", min_value=1, max_value=60, value=current_settings.get("risk_management", {}).get("auto_pause_volatility_window_min", 5), step=1)
+        diversification_pairs = st.number_input("Diversify across N trading pairs", min_value=1, max_value=20, value=current_settings.get("risk_management", {}).get("diversification_pairs_count", 5), step=1)
+    
+    st.subheader("Order Customization")
+    st.write("Define how trades are executed.")
+    col_order_1, col_order_2 = st.columns(2)
+    with col_order_1:
+        st.checkbox("Enable Trailing Take-Profit", value=current_settings.get("order_customization", {}).get("enable_trailing_take_profit", False), key="enable_trailing_tp")
+        st.checkbox("Enable Trailing Stop-Loss", value=current_settings.get("order_customization", {}).get("enable_trailing_stop_loss", False), key="enable_trailing_sl")
+    with col_order_2:
+        st.selectbox("Default Order Type", ["Market", "Limit", "Conditional"], index=0, key="default_order_type")
+        st.checkbox("Enable Batch Order Execution (for large capital)", value=current_settings.get("order_customization", {}).get("enable_batch_orders", False), key="enable_batch_orders")
+
+    st.subheader("Arbitrage Parameters")
+    st.write("Fine-tune conditions for detecting and executing arbitrage opportunities.")
+    col_param_1, col_param_2 = st.columns(2)
+    with col_param_1:
+        min_spread_threshold = st.number_input("Minimum Spread Threshold (%)", min_value=0.1, max_value=5.0, value=current_settings.get("thresholds", {}).get("min_spread_percent", 0.5), step=0.1)
+        max_trade_size = st.number_input("Maximum Trade Size (USD) per transaction", min_value=100.0, max_value=100000.0, value=current_settings.get("arbitrage_parameters", {}).get("max_trade_size_usd", 10000.0), step=100.0)
+    with col_param_2:
+        gas_fee_cap = st.number_input("Gas Fee Cap (USD) per transaction", min_value=0.0, max_value=50.0, value=current_settings.get("arbitrage_parameters", {}).get("gas_fee_cap_usd", 10.0), step=1.0)
+        st.text_area("Blacklist Tokens (comma-separated, e.g. 'SHIB,DOGE')", value=", ".join(current_settings.get("arbitrage_parameters", {}).get("blacklist_tokens", [])), key="blacklist_tokens_input")
+        
+    if st.button("Save Auto Trading Settings", type="primary"):
+        new_risk_settings = {
+            "stop_loss_pct": stop_loss_pct,
+            "take_profit_pct": take_profit_pct,
+            "capital_allocation_limit_pct": capital_allocation_limit,
+            "auto_pause_volatility_pct": auto_pause_volatility_pct,
+            "auto_pause_volatility_window_min": auto_pause_volatility_window,
+            "diversification_pairs_count": diversification_pairs
+        }
+        new_order_settings = {
+            "enable_trailing_take_profit": st.session_state.enable_trailing_tp,
+            "enable_trailing_stop_loss": st.session_state.enable_trailing_sl,
+            "default_order_type": st.session_state.default_order_type,
+            "enable_batch_orders": st.session_state.enable_batch_orders
+        }
+        new_arb_params = {
+            "min_spread_threshold": min_spread_threshold,
+            "max_trade_size_usd": max_trade_size,
+            "gas_fee_cap_usd": gas_fee_cap,
+            "blacklist_tokens": [t.strip().upper() for t in st.session_state.blacklist_tokens_input.split(',') if t.strip()]
+        }
+        current_settings["bot_mode"] = new_bot_mode
+        current_settings["risk_management"] = new_risk_settings
+        current_settings["order_customization"] = new_order_settings
+        current_settings["arbitrage_parameters"] = new_arb_params
+        
+        settings_manager.save_settings(current_settings) # Save entire updated settings
+        st.success("Auto Trading settings saved successfully! Restart bot to apply changes.")
+
+elif selected_page == "Analytics":
+    st.header("Analytics & Predictive Insights")
+    st.write("Visualize historical and real-time profit data.")
+
+    # Placeholder for plot
+    st.subheader("Historical Profit Trend (Last 24h)")
+    # This data would come from a backend database of executed trades
+    # For now, let's mock some data
+    mock_profit_data = {
+        "timestamp": [datetime.now() - timedelta(hours=i) for i in range(24, 0, -1)],
+        "profit_usd": [i * 10 + (i % 5) * 2 - 50 for i in range(24)] # Mock data
+    }
+    mock_df = pd.DataFrame(mock_profit_data)
+    st.line_chart(mock_df.set_index("timestamp"))
+
+    st.subheader("Trade Success Rate Over Time")
+    # Mock data for success rate
+    mock_success_data = {
+        "date": [datetime.now() - timedelta(days=i) for i in range(7, 0, -1)],
+        "success_rate": [85 + (i % 10) for i in range(7)]
+    }
+    mock_success_df = pd.DataFrame(mock_success_data)
+    st.area_chart(mock_success_df.set_index("date"))
+
+    st.info("Predictive analytics and CoinGecko integration are planned features.")
+
+elif selected_page == "Portfolio":
+    st.header("Portfolio Overview")
+    st.write("Track your assets across all connected exchanges.")
+    # This would require connecting to CEXs and DEXs to get actual balances
+    st.warning("Feature under development. Connect wallet/exchange for live portfolio tracking.")
+    
+    # Mock portfolio data
+    mock_portfolio = {
+        "Exchange": ["Binance", "Coinbase", "Metamask (ETH)", "Phantom (SOL)"],
+        "Asset": ["USDT", "BTC", "ETH", "SOL"],
+        "Balance": [15000.00, 0.5, 2.0, 10.0],
+        "USD Value": [15000.00, 32500.00, 7000.00, 1450.00]
+    }
+    st.dataframe(pd.DataFrame(mock_portfolio))
+
+elif selected_page == "Multi-Chain":
+    st.header("Multi-Chain Insights")
+    st.write("View aggregated data and health for all connected blockchains.")
+    st.warning("This section would show network health, gas prices, and cross-chain volume. Feature under development.")
+    
+    # Mock chain status
+    chain_status = {
+        "Network": ["Ethereum", "Polygon", "Solana", "BSC", "Arbitrum"],
+        "Status": ["🟢 Online", "🟢 Online", "🟢 Online", "🟢 Online", "🟢 Online"],
+        "Current Gas Price (Gwei/Lamports)": [25, 50, 0.000005, 5, 0.1],
+        "24h Volume (USD)": ["$1.2B", "$350M", "$800M", "$600M", "$200M"]
+    }
+    st.dataframe(pd.DataFrame(chain_status))
+
+elif selected_page == "Settings":
+    # This is where your previous settings tab content would go, but now it's a full page
+    st.header("Global Settings")
+
+    st.subheader("Telegram Notifications")
+    current_settings["telegram"]["bot_token"] = st.text_input("Telegram Bot Token", value=current_settings.get("telegram", {}).get("bot_token", ""), type="password")
+    current_settings["telegram"]["chat_id"] = st.text_input("Telegram Chat ID", value=current_settings.get("telegram", {}).get("chat_id", ""))
+
+    st.subheader("CEX API Keys")
+    st.write("Enter API Key and Secret for each Centralized Exchange. Leave empty to disable.")
+    for platform in CEX_PLATFORMS:
+        st.write(f"**{platform}**")
+        col1, col2 = st.columns(2)
+        with col1:
+            key = st.text_input(f"{platform} API Key", value=current_settings.get("api_keys", {}).get(platform, {}).get("api_key", ""), key=f"{platform}_key_set")
+        with col2:
+            secret = st.text_input(f"{platform} Secret Key", value=current_settings.get("api_keys", {}).get(platform, {}).get("secret_key", ""), type="password", key=f"{platform}_secret_set")
+        
+        if key or secret:
+            current_settings["api_keys"][platform] = {"api_key": key, "secret_key": secret}
+        elif platform in current_settings["api_keys"]:
+            del current_settings["api_keys"][platform]
+
+    st.subheader("DEX Token Contract Addresses (per Network)")
+    for network in DEX_NETWORKS:
+        st.write(f"**{network}**")
+        # Ensure the network key exists in current_settings
+        if network not in current_settings["token_contracts"]:
+            current_settings["token_contracts"][network] = {}
+        
+        # Display existing contracts
+        for symbol, address in current_settings["token_contracts"][network].copy().items(): # Use .copy() to allow deletion during iteration
+            new_address = st.text_input(f"{network} - {symbol} Contract Address", value=address, key=f"{network}_{symbol}_contract_existing_set")
+            if new_address:
+                current_settings["token_contracts"][network][symbol] = new_address
+            else:
+                del current_settings["token_contracts"][network][symbol]
+        
+        # Allow adding new token contracts
+        new_symbol_col, new_address_col = st.columns(2)
+        with new_symbol_col:
+            new_symbol = st.text_input(f"{network} - New Symbol", key=f"{network}_new_symbol_input_set")
+        with new_address_col:
+            new_address = st.text_input(f"{network} - New Contract Address", key=f"{network}_new_address_input_set")
+        if new_symbol and new_address:
+            current_settings["token_contracts"][network][new_symbol.upper()] = new_address
+            st.success(f"Added {new_symbol.upper()} to {network}.")
+
+    st.subheader("RPC URLs (per Network)")
+    for network in DEX_NETWORKS:
+        current_urls_str = ", ".join(current_settings.get("rpc_urls", {}).get(network, []))
+        new_urls_str = st.text_area(f"{network} RPC URLs", value=current_urls_str, height=70, key=f"{network}_rpc_urls_set")
+        current_settings["rpc_urls"][network] = [url.strip() for url in new_urls_str.split(',') if url.strip()]
+
+    st.subheader("Network Fees & CEX Withdrawal Fees")
+    st.write("**Network Fees**")
+    for network in DEX_NETWORKS:
+        fee = st.number_input(f"{network} - Avg. Network Fee (USD equivalent)", value=float(current_settings.get("network_fees", {}).get(network, 0.0)), format="%.6f", key=f"{network}_net_fee_set")
+        current_settings["network_fees"][network] = fee
+
+    st.write("**CEX Withdrawal Fees (per token/network)**")
+    for cex in CEX_PLATFORMS:
+        st.write(f"*{cex}*")
+        if cex not in current_settings["withdrawal_fees_cex"]:
+            current_settings["withdrawal_fees_cex"][cex] = {}
+        
+        for key, fee_val in current_settings["withdrawal_fees_cex"][cex].copy().items():
+            new_fee_val = st.number_input(f"{cex} - {key} Withdrawal Fee", value=float(fee_val), format="%.6f", key=f"{cex}_{key}_withdraw_existing_set")
+            if new_fee_val is not None:
+                current_settings["withdrawal_fees_cex"][cex][key] = new_fee_val
+            else:
+                del current_settings["withdrawal_fees_cex"][cex][key]
+        
+        new_withdraw_token_col, new_withdraw_network_col, new_withdraw_fee_col = st.columns(3)
+        with new_withdraw_token_col:
+            new_token_symbol = st.text_input(f"{cex} - New Token Symbol (e.g. USDC)", key=f"{cex}_new_withdraw_token_set")
+        with new_withdraw_network_col:
+            new_network_for_withdraw = st.selectbox(f"{cex} - New Network", [""] + DEX_NETWORKS, key=f"{cex}_new_withdraw_network_set")
+        with new_withdraw_fee_col:
+            new_withdraw_fee = st.number_input(f"{cex} - New Fee Value", value=0.0, format="%.6f", key=f"{cex}_new_withdraw_fee_set")
+        
+        if new_token_symbol and new_network_for_withdraw and new_withdraw_fee is not None:
+            new_key = f"{new_token_symbol.upper()}_{new_network_for_withdraw.upper()}"
+            current_settings["withdrawal_fees_cex"][cex][new_key] = new_withdraw_fee
+            st.success(f"Added {new_key} withdrawal fee for {cex}.")
+
+    st.subheader("Trading Fees (per platform)")
+    all_platforms_for_fees = CEX_PLATFORMS + ["JUPITER", "UNISWAP", "PANCAKESWAP", "TRADERJOE", "QUICKSWAP", "SPOOKYSWAP"] # Add more DEXs as needed
+    for platform in all_platforms_for_fees:
+        fee = st.number_input(f"{platform} Trading Fee (%)", value=float(current_settings.get("trading_fees", {}).get(platform, 0.0)), format="%.5f", key=f"{platform}_trading_fee_set")
+        current_settings["trading_fees"][platform] = fee
+
+    if st.button("Save Global Settings", type="primary"):
+        settings_manager.save_settings(current_settings)
+        st.success("Global Settings saved successfully! Please restart the bot if running to apply changes.")
+
+
+# --- Logs Page (now integrated into a dedicated page, but still shows real-time) ---
+# This part is shared with the main loop in main.py.
+# The logger needs to be attached to the Streamlit text area.
+with tab_logs: # Original tab_logs for persistent display outside specific pages
+    st.header("Bot Activity Logs")
+    log_area_placeholder = st.empty()
+    # Attach Streamlit log handler to the main logger
+    if not bot_main.streamlit_log_handler_instance:
+        bot_main.attach_streamlit_log_handler(log_area_placeholder)
+    else:
+        # If already attached, just update the text_area reference in case of rerun
+        bot_main.streamlit_log_handler_instance.text_area = log_area_placeholder
+        # Re-display existing logs if any
+        if bot_main.streamlit_log_handler_instance.messages:
+            log_area_placeholder.text("\n".join(bot_main.streamlit_log_handler_instance.messages[-20:]))
+
+# Optional: Auto-refresh the UI every few seconds to show live data
+# This can be resource-intensive if too frequent.
+# if bot_main.get_bot_status():
+#     time.sleep(1) # Refresh every second while bot is running
+#     st.rerun() # Rerun the script to update the UI
+
+Notes on UI Design:
+ * Logo: You'll need to place a bot_logo.png image in your arbitrage_bot/ directory or update the path.
+ * Dynamic UI Elements: Many elements like "Total Balance", "24h AI Profit", "Success Rate" will require actual data from the backend. For the initial implementation, these can be mocked or simply display "N/A" until the backend is fully developed to provide these metrics.
+ * "Execute" Button: In Arbitrage Monitor, this button would trigger a manual trade execution for a specific opportunity. This implies a new function in main.py (e.g., execute_single_trade(opportunity_details)).
+ * Security Alerts: bot_main.get_security_alerts() would check for issues like API key failures, low balance, high slippage, etc.
+ * Live Opportunities Table: Streamlit's st.dataframe or st.table can display the opportunities. The card-like layout would require more CSS/HTML or a dedicated Streamlit component. My example uses st.columns to simulate cards.
+ * Real-time Logs: The StreamlitLogHandler in logger.py is crucial for showing logs in the UI.
+2. New Backend Features & Logic
+This is where the core intelligence and complexity come in. We'll need to extend settings_manager.py, main.py, arbitrage_detector.py, and potentially the connectors.
+2.1. Updated config.json Structure
+We need to add new fields for the advanced features.
+{
+    "telegram": {
+        "bot_token": "",
+        "chat_id": ""
+    },
+    "api_keys": { /* ... existing CEX API keys ... */ },
+    "token_contracts": { /* ... existing token contracts ... */ },
+    "rpc_urls": { /* ... existing RPC URLs ... */ },
+    "network_fees": { /* ... existing network fees ... */ },
+    "withdrawal_fees_cex": { /* ... existing withdrawal fees ... */ },
+    "trading_fees": { /* ... existing trading fees ... */ },
+    "bot_mode": "Inactive",  // "Execution Enabled" or "Inactive"
+    "thresholds": {
+        "min_spread_percent": 1.0,
+        "min_net_profit_usd": 0.5
+    },
+    "check_interval_seconds": 60,
+    "risk_management": {
+        "stop_loss_pct": 1.0,
+        "take_profit_pct": 5.0,
+        "auto_pause_volatility_pct": 5.0,
+        "auto_pause_volatility_window_min": 5,
+        "capital_allocation_limit_pct": 10.0,
+        "diversification_pairs_count": 5
+    },
+    "order_customization": {
+        "enable_trailing_take_profit": false,
+        "enable_trailing_stop_loss": false,
+        "default_order_type": "Market",
+        "enable_batch_orders": false
+    },
+    "arbitrage_parameters": {
+        "min_spread_threshold": 0.5,
+        "max_trade_size_usd": 10000.0,
+        "gas_fee_cap_usd": 10.0,
+        "blacklist_tokens": ["SHIB", "DOGE"]
+    },
+    "wallet_integration": {
+        "metamask_private_key": "", // For non-custodial
+        "trust_wallet_private_key": ""
+    },
+    "trading_history": [] // To store executed trades for analytics
+}
+
+2.2. settings_manager.py Updates
+Ensure _create_default_config and save_settings handle all new fields. The provided settings_manager.py already uses json.dump(self.settings, f, indent=4) which will automatically handle new keys. Just make sure your initial _create_default_config reflects the new structure.
+2.3. main.py (Extended Coordination & Execution)
+main.py becomes the central orchestrator for all new features.
+# ... (existing imports) ...
+import asyncio
+import threading
+import time
+from typing import Dict, List, Any
+from datetime import datetime, timedelta
+import random # For mocking
+
+# --- Import new modules/classes (will be created) ---
+# from trading_executor import TradingExecutor
+# from portfolio_manager import PortfolioManager
+# from analytics_dashboard import AnalyticsDashboard # For data aggregation, not UI directly
+
+# Global variables for bot state and UI communication
+bot_running_state = threading.Event()
+discovered_opportunities: List[Dict] = []
+streamlit_log_handler_instance = None
+bot_start_time: Optional[datetime] = None
+total_profit_24h: float = 0.0
+total_trades_24h: int = 0
+successful_trades_24h: int = 0
+avg_spread_24h: float = 0.0
+total_portfolio_balance: float = 0.0
+security_alerts: List[str] = [] # e.g., ["Binance API key invalid", "Low balance on Ethereum"]
+trade_history: List[Dict] = [] # Store executed trades for analytics
+
+# For multi-level arbitrage types in constants.py
+# ARBITRAGE_TYPES = ["SIMPLE", "TRIANGULAR", "CROSS_CHAIN"]
+
+async def run_bot_loop():
+    """Main asynchronous loop for the arbitrage bot."""
+    global discovered_opportunities, bot_start_time, total_profit_24h, total_trades_24h, \
+           successful_trades_24h, avg_spread_24h, total_portfolio_balance, security_alerts, trade_history
+
+    bot_start_time = datetime.now()
+    
+    settings_manager = SettingsManager()
+    
+    # Initialize modules with current settings
+    current_settings = settings_manager.get_all_settings()
+    price_fetcher = PriceFetcher(settings_manager)
+    arbitrage_detector = ArbitrageDetector(current_settings)
+    notifier = TelegramNotifier(
+        bot_token=current_settings.get("telegram", {}).get("bot_token", ""),
+        chat_id=current_settings.get("telegram", {}).get("chat_id", "")
+    )
+    # trading_executor = TradingExecutor(current_settings) # Initialize Trading Executor
+
+    check_interval_seconds = current_settings.get("check_interval_seconds", 60)
+    logger.info(f"Bot started with check interval: {check_interval_seconds} seconds.")
+
+    # Reset 24h stats at start of loop
+    total_profit_24h = 0.0
+    total_trades_24h = 0
+    successful_trades_24h = 0
+    avg_spread_24h = 0.0
+    
+    # Mock Security check
+    security_alerts.clear()
+    if not current_settings.get("telegram", {}).get("bot_token"):
+        security_alerts.append("Telegram Bot Token is missing. Notifications disabled.")
+    if not current_settings.get("api_keys", {}).get("BINANCE", {}).get("api_key"):
+        security_alerts.append("Binance API key is missing. CEX operations for Binance will fail.")
+    # Add more security checks as needed (e.g., sufficient balance, valid RPCs)
+
+
+    while bot_running_state.is_set():
+        try:
+            # Refresh settings for dynamic updates (e.g., bot_mode, risk parameters)
+            current_settings = settings_manager.get_all_settings()
+            arbitrage_detector.settings = current_settings # Update detector's settings
+            # trading_executor.settings = current_settings # Update executor's settings if implemented
+
+            # --- Step 1: Fetch Combined Data (Prices, Quotes, Liquidity) ---
+            combined_data = await price_fetcher.get_combined_price_data(
+                # Pass current settings or calculated values needed for quotes, e.g., max_trade_size
+                amount_to_trade=current_settings.get("arbitrage_parameters", {}).get("max_trade_size_usd", 10000.0)
+            )
+            
+            # --- Step 2: Detect Arbitrage Opportunities ---
+            opportunities = await arbitrage_detector.find_arbitrage_opportunities(combined_data)
+
+            # Update global opportunities for UI display
+            discovered_opportunities.clear()
+            discovered_opportunities.extend(opportunities)
+
+            # --- Step 3: Evaluate and Execute (if auto-trading enabled) ---
+            bot_mode = current_settings.get("bot_mode", "Inactive")
+            if opportunities:
+                logger.info(f"Found {len(opportunities)} profitable opportunities.")
+                for opp in opportunities:
+                    # Update analytics metrics
+                    total_trades_24h += 1
+                    avg_spread_24h = (avg_spread_24h * (total_trades_24h - 1) + opp['spread_percent']) / total_trades_24h if total_trades_24h > 0 else opp['spread_percent']
+                    
+                    if bot_mode == "Execution Enabled":
+                        logger.info(f"Auto-executing opportunity: {opp['asset']} - Net Profit: {opp['net_profit_usd']:.2f}$")
+                        # You would call the trading executor here
+                        # trade_success, trade_result = await trading_executor.execute_trade(opp)
+                        
+                        # Mock execution success/failure
+                        trade_success = random.choice([True, True, True, False]) # 75% success rate for mock
+                        trade_result = {"status": "success", "profit": opp['net_profit_usd']} if trade_success else {"status": "failed", "reason": "Slippage exceeded"}
+
+                        if trade_success:
+                            successful_trades_24h += 1
+                            total_profit_24h += trade_result.get("profit", 0)
+                            logger.info(f"Successfully executed trade for {opp['asset']}. Profit: {trade_result.get('profit', 0):.2f}$")
+                            message = notifier.format_arbitrage_message(opp) # Send notification on success
+                            await notifier.send_message(message)
+                            trade_history.append({"timestamp": datetime.now(), "opportunity": opp, "result": trade_result})
+                        else:
+                            logger.warning(f"Trade execution failed for {opp['asset']}. Reason: {trade_result.get('reason', 'Unknown')}")
+                            # Send failure notification if critical
+                            # await notifier.send_message(f"⚠️ Trade Failed: {opp['asset']}. Reason: {trade_result.get('reason', 'Unknown')}")
+                    else: # Inactive mode
+                        logger.info(f"Bot in Inactive mode. Not executing trade for {opp['asset']}.")
+                        message = notifier.format_arbitrage_message(opp)
+                        await notifier.send_message(message) # Still notify in inactive mode
+            else:
+                logger.info("No profitable opportunities found in this cycle.")
+                discovered_opportunities.clear() # Clear if no opportunities found
+
+            # --- Step 4: Update Portfolio (Mock for now) ---
+            # In a real bot, this would fetch actual balances from CEXs/DEXs
+            total_portfolio_balance = 25000 + random.uniform(-500, 500) # Mock dynamic balance
+
+        except Exception as e:
+            logger.error(f"An error occurred in the main bot loop: {e}", exc_info=True)
+            security_alerts.append(f"Critical error in main loop: {e}")
+            # Consider auto-pausing bot on critical errors
+            # stop_bot_in_thread()
+            # await notifier.send_message(f"🚨 Bot Critical Error: {e}. Bot stopped.")
+
+        await asyncio.sleep(check_interval_seconds)
+    
+    logger.info("Bot loop stopped.")
+
+# --- Functions for UI to get real-time data ---
+
+# These functions are called by app.py to get updated stats
+def get_bot_status() -> bool:
+    return bot_running_state.is_set()
+
+def get_discovered_opportunities() -> List[Dict]:
+    return discovered_opportunities
+
+def get_24h_profit() -> float:
+    # In a real scenario, this would sum profits from trade_history for last 24h
+    # For now, use the global variable which accumulates during runtime
+    return total_profit_24h
+
+def get_24h_profit_change() -> float:
+    # Requires storing previous 24h profit. Mocking for now.
+    return random.uniform(-10, 20) # Mock change %
+
+def get_success_rate() -> float:
+    if total_trades_24h == 0:
+        return 0.0
+    return (successful_trades_24h / total_trades_24h) * 100
+
+def get_successful_trades_count() -> int:
+    return successful_trades_24h
+
+def get_total_trades_count() -> int:
+    return total_trades_24h
+
+def get_avg_spread() -> float:
+    return avg_spread_24h
+
+def get_ai_uptime_str() -> str:
+    if bot_start_time:
+        uptime = datetime.now() - bot_start_time
+        hours, remainder = divmod(uptime.total_seconds(), 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f"{int(hours)}h {int(minutes)}m"
+    return "N/A"
+
+def get_portfolio_balance() -> float:
+    # In a real bot, this would sum balances from all connected exchanges/wallets.
+    # For now, it's a mock.
+    return total_portfolio_balance
+
+def get_security_alerts() -> List[str]:
+    return security_alerts
+
+def get_active_pairs_count() -> int:
+    # This would track how many unique pairs had opportunities/trades
+    return len(set([opp['asset'] for opp in discovered_opportunities])) if discovered_opportunities else 0
+
+# --- Bot Control Functions (Called by Streamlit) ---
+def start_bot_in_thread():
+    if not bot_running_state.is_set():
+        bot_running_state.set()
+        def run_loop():
+            asyncio.run(run_bot_loop())
+        bot_thread = threading.Thread(target=run_loop)
+        bot_thread.daemon = True
+        bot_thread.start()
+        logger.info("Bot thread started.")
+    else:
+        logger.info("Bot is already running.")
+
+def stop_bot_in_thread():
+    if bot_running_state.is_set():
+        bot_running_state.clear()
+        logger.info("Bot stop signal sent.")
+    else:
+        logger.info("Bot is not running.")
+
+# Function to attach Streamlit log handler (called from app.py)
+def attach_streamlit_log_handler(text_area_widget):
+    global streamlit_log_handler_instance
+    if not streamlit_log_handler_instance:
+        streamlit_log_handler_instance = StreamlitLogHandler(text_area_widget)
+        logger.addHandler(streamlit_log_handler_instance)
+        logger.info("Streamlit log handler attached.")
+
+# Entry point for stand-alone execution
+if __name__ == "__main__":
+    logger.info("Running main.py directly (stand-alone bot mode).")
+    bot_running_state.set()
+    try:
+        asyncio.run(run_bot_loop())
+    except KeyboardInterrupt:
+        logger.info("Bot manually interrupted.")
+        stop_bot_in_thread()
+
+
+2.4. arbitrage_detector.py (Multi-Level Arbitrage & Advanced Calculations)
+This module needs significant enhancement to handle new arbitrage types and integrate risk parameters.
+# ... (existing imports) ...
+from typing import Dict, List, Optional
+from logger import logger
+from utils.helpers import format_currency
+from utils.constants import SUPPORTED_TOKENS, CEX_PLATFORMS, DEX_NETWORKS # Added for clarity
+
+class ArbitrageDetector:
+    def __init__(self, settings: dict):
+        self.settings = settings
+        self.logger = logger
+        self._load_arbitrage_params()
+
+    def _load_arbitrage_params(self):
+        """Loads arbitrage parameters and risk management settings."""
+        self.min_spread_threshold = self.settings.get("arbitrage_parameters", {}).get("min_spread_threshold", 0.5)
+        self.max_trade_size_usd = self.settings.get("arbitrage_parameters", {}).get("max_trade_size_usd", 10000.0)
+        self.gas_fee_cap_usd = self.settings.get("arbitrage_parameters", {}).get("gas_fee_cap_usd", 10.0)
+        self.blacklist_tokens = [t.upper() for t in self.settings.get("arbitrage_parameters", {}).get("blacklist_tokens", [])]
+
+        self.min_net_profit_usd = self.settings.get("thresholds", {}).get("min_net_profit_usd", 0.5) # Kept for backward compat
+
+        self.trading_fees = self.settings.get("trading_fees", {})
+        self.network_fees = self.settings.get("network_fees", {})
+        self.withdrawal_fees_cex = self.settings.get("withdrawal_fees_cex", {})
+
+        # Risk Management settings
+        self.stop_loss_pct = self.settings.get("risk_management", {}).get("stop_loss_pct", 1.0) / 100
+        self.take_profit_pct = self.settings.get("risk_management", {}).get("take_profit_pct", 5.0) / 100
+        self.capital_allocation_limit_pct = self.settings.get("risk_management", {}).get("capital_allocation_limit_pct", 10.0) / 100
+        self.auto_pause_volatility_pct = self.settings.get("risk_management", {}).get("auto_pause_volatility_pct", 5.0) / 100
+        self.auto_pause_volatility_window_min = self.settings.get("risk_management", {}).get("auto_pause_volatility_window_min", 5)
+        self.diversification_pairs_count = self.settings.get("risk_management", {}).get("diversification_pairs_count", 5)
+
+    def _get_platform_trading_fee(self, platform_name: str) -> float:
+        return self.trading_fees.get(platform_name.upper(), 0.0)
+
+    def _get_network_fee(self, network_name: str) -> float:
+        # In a real system, this would be dynamic via RPC calls
+        return self.network_fees.get(network_name.upper(), 0.0)
+
+    def _get_cex_withdrawal_fee(self, cex_name: str, symbol: str, network: str) -> float:
+        key = f"{symbol.upper()}_{network.upper()}"
+        return self.withdrawal_fees_cex.get(cex_name.upper(), {}).get(key, 0.0)
+
+    async def _calculate_net_profit(self, asset_symbol: str, buy_platform_info: Dict, sell_platform_info: Dict, initial_amount_usd: float) -> Optional[Dict]:
+        """
+        Calculates the net profit for a given buy/sell scenario.
+        This is the core calculation logic, updated to include more fees and risk considerations.
+        """
+        buy_platform_name = buy_platform_info["name"]
+        buy_platform_type = buy_platform_info["type"]
+        buy_platform_network = buy_platform_info.get("network")
+        buy_price = buy_platform_info["price"]
+
+        sell_platform_name = sell_platform_info["name"]
+        sell_platform_type = sell_platform_info["type"]
+        sell_platform_network = sell_platform_info.get("network")
+        sell_price = sell_platform_info["price"]
+
+        if buy_price is None or sell_price is None or buy_price <= 0:
+            return None
+
+        # Check blacklist
+        if asset_symbol.upper() in self.blacklist_tokens:
+            self.logger.debug(f"Skipping {asset_symbol} due to blacklist.")
+            return None
+
+        gross_spread_percent = ((sell_price - buy_price) / buy_price) * 100
+
+        if gross_spread_percent < self.min_spread_threshold:
+            return None # Filter out low spread opportunities early
+
+        # Ensure trade size is within limits
+        trade_size_usd = min(initial_amount_usd, self.max_trade_size_usd)
+        estimated_asset_amount = trade_size_usd / buy_price
+
+        # --- Fees Calculation ---
+        total_fees_usd = 0.0
+
+        # Trading fees (buy side)
+        buy_trading_fee_rate = self._get_platform_trading_fee(buy_platform_name)
+        buy_fee_usd = estimated_asset_amount * buy_price * buy_trading_fee_rate
+        total_fees_usd += buy_fee_usd
+
+        # Trading fees (sell side)
+        sell_trading_fee_rate = self._get_platform_trading_fee(sell_platform_name)
+        sell_fee_usd = estimated_asset_amount * sell_price * sell_trading_fee_rate
+        total_fees_usd += sell_fee_usd
+
+        # Network/Withdrawal fees
+        # This is complex and needs precise logic per scenario:
+        # 1. CEX to CEX (same chain): withdrawal fee from CEX1
+        # 2. CEX to CEX (different chain): withdrawal fee from CEX1 + deposit fee CEX2 (often zero)
+        # 3. CEX to DEX: withdrawal fee from CEX + network fee on DEX chain
+        # 4. DEX to CEX: network fee on DEX chain + deposit fee CEX (often zero)
+        # 5. DEX to DEX (same chain): network fee for swap
+        # 6. DEX to DEX (different chain): network fee for swap + bridge fee + network fee on target chain
+
+        # For simplicity, we'll apply estimated network/withdrawal fees
+        # A more robust solution would compute this based on actual transfer routes and involved chains.
+        
+        # Example: CEX Withdrawal Fee
+        if buy_platform_type == "CEX" and sell_platform_type == "DEX":
+             # Assuming we transfer asset_symbol from CEX to DEX's network
+             withdrawal_fee = self._get_cex_withdrawal_fee(buy_platform_name, asset_symbol, sell_platform_network)
+             total_fees_usd += withdrawal_fee
+             total_fees_usd += self._get_network_fee(sell_platform_network) # Cost of interacting with DEX
+        elif buy_platform_type == "DEX" and sell_platform_type == "CEX":
+             total_fees_usd += self._get_network_fee(buy_platform_network) # Cost of swapping/sending from DEX
+             # If selling on CEX, need to consider deposit fee if any, usually zero.
+        elif buy_platform_type == "CEX" and sell_platform_type == "CEX":
+            # If trade requires a transfer between CEXs
+            if buy_platform_name != sell_platform_name: # Simple cross-CEX transfer
+                # You'd need to know the transfer chain, here it's simplified.
+                withdrawal_fee = self._get_cex_withdrawal_fee(buy_platform_name, asset_symbol, sell_platform_network or "DEFAULT_CEX_NETWORK")
+                total_fees_usd += withdrawal_fee
+        elif buy_platform_type == "DEX" and sell_platform_type == "DEX" and buy_platform_network != sell_platform_network:
+            # Cross-chain DEX-DEX arbitrage implies bridge fees
+            # This is highly complex and requires specific bridge API integration
+            self.logger.warning("Cross-chain DEX-DEX arbitrage requires dedicated bridge fee calculation.")
+            # For now, add a generic high fee or handle as unsupported
+            total_fees_usd += 10.0 # Placeholder for bridge fee
+
+
+        # Dynamic Liquidity Management & Slippage:
+        # If PriceFetcher provides actual quotes (like from Jupiter/1inch),
+        # slippage is already embedded in the `outAmount`.
+        # If using simple spot prices, slippage needs to be estimated:
+        # slippage_impact_usd = estimated_asset_amount * buy_price * (estimated_slippage_percent / 100)
+        # total_fees_usd += slippage_impact_usd
+        # The image suggests 'Liquidity' is available. You would use this to estimate slippage.
+
+        # Check gas fee cap for DEX trades
+        if (buy_platform_type == "DEX" or sell_platform_type == "DEX") and total_fees_usd > self.gas_fee_cap_usd:
+            self.logger.debug(f"Opportunity for {asset_symbol} rejected due to high gas fees: {total_fees_usd:.2f}$ > {self.gas_fee_cap_usd:.2f}$")
+            return None
+
+
+        # Gross Profit (before all fees)
+        gross_profit_usd = (estimated_asset_amount * sell_price) - (estimated_asset_amount * buy_price)
+        net_profit_usd = gross_profit_usd - total_fees_usd
+
+        # Check net profit threshold
+        if net_profit_usd < self.min_net_profit_usd:
+            return None
+
+        # Build opportunity details
+        opportunity_details = {
+            "asset": asset_symbol,
+            "buy_platform": buy_platform_info,
+            "sell_platform": sell_platform_info,
+            "initial_amount_usd": trade_size_usd,
+            "estimated_asset_amount": estimated_asset_amount,
+            "estimated_gross_profit_usd": gross_profit_usd,
+            "total_fees_usd": total_fees_usd,
+            "net_profit_usd": net_profit_usd,
+            "spread_percent": gross_spread_percent,
+            "opportunity_type": f"{buy_platform_type}_TO_{sell_platform_type}",
+            "liquidity_info": {"estimated_total_liquidity": 1000000 + random.randint(-500000, 500000)}, # Mock liquidity
+            "volume_info": {"24h_volume": f"{random.randint(100, 5000)}K"}, # Mock volume
+            "time_ago": f"{random.randint(1, 60)}s" # Mock time
+        }
+
+        if buy_platform_network and sell_platform_network and buy_platform_network != sell_platform_network:
+            opportunity_details["opportunity_type"] += "_CROSS_CHAIN"
+
+        return opportunity_details
+
+    async def find_arbitrage_opportunities(self, combined_price_data: Dict) -> List[Dict]:
+        """
+        Finds and analyzes all potential arbitrage opportunities based on configured types.
+        """
+        self.logger.info("Searching for arbitrage opportunities...")
+        opportunities = []
+        
+        cex_prices = combined_price_data.get("cex_prices", {})
+        dex_quotes = combined_price_data.get("dex_quotes", {})
+        
+        # Reload settings for latest thresholds/params
+        self._load_arbitrage_params()
+
+        # Bot Mode: Simple Arbitrage (CEX-DEX, CEX-CEX)
+        # This covers Simple Arbitrage and part of Cross-Chain
+        opportunities.extend(await self._find_simple_arbitrage(cex_prices, dex_quotes))
+
+        # Triangular Arbitrage (within CEX or DEX) - More complex
+        # This requires more advanced pathfinding logic: A->B, B->C, C->A
+        # opportunities.extend(await self._find_triangular_arbitrage(cex_prices, dex_quotes))
+
+        # Cross-Chain Arbitrage (DEX-DEX) - Very complex due to bridge fees
+        # This requires specific bridge cost estimations
+        # opportunities.extend(await self._find_cross_chain_dex_dex_arbitrage(dex_quotes))
+
+
+        # Sort opportunities by net profit for display/prioritization
+        opportunities.sort(key=lambda x: x.get("net_profit_usd", 0), reverse=True)
+        
+        # Apply diversification limit if total portfolio is large (mock for now)
+        # In a real scenario, this would use PortfolioManager data
+        if len(opportunities) > self.diversification_pairs_count:
+            self.logger.info(f"Limiting opportunities to top {self.diversification_pairs_count} for diversification.")
+            opportunities = opportunities[:self.diversification_pairs_count]
+
+
+        self.logger.info(f"Found {len(opportunities)} filtered arbitrage opportunities.")
+        return opportunities
+
+    async def _find_simple_arbitrage(self, cex_prices: Dict, dex_quotes: Dict) -> List[Dict]:
+        """Finds CEX-DEX and CEX-CEX simple arbitrage opportunities."""
+        found_opportunities = []
+        initial_trade_amount_usd = self.max_trade_size_usd # Use max trade size as reference
+
+        # --- CEX-CEX Opportunities ---
+        cex_names = list(cex_prices.keys())
+        for i in range(len(cex_names)):
+            for j in range(i + 1, len(cex_names)):
+                platform1_name = cex_names[i]
+                platform2_name = cex_names[j]
+
+                for asset_symbol in SUPPORTED_TOKENS:
+                    price1 = cex_prices.get(platform1_name, {}).get(asset_symbol)
+                    price2 = cex_prices.get(platform2_name, {}).get(asset_symbol)
+
+                    if price1 and price2:
+                        # Buy on Platform1, Sell on Platform2
+                        buy_info = {"name": platform1_name, "type": "CEX", "price": price1}
+                        sell_info = {"name": platform2_name, "type": "CEX", "price": price2}
+                        opportunity = await self._calculate_net_profit(asset_symbol, buy_info, sell_info, initial_trade_amount_usd)
+                        if opportunity: found_opportunities.append(opportunity)
+
+                        # Buy on Platform2, Sell on Platform1
+                        buy_info = {"name": platform2_name, "type": "CEX", "price": price2}
+                        sell_info = {"name": platform1_name, "type": "CEX", "price": price1}
+                        opportunity = await self._calculate_net_profit(asset_symbol, buy_info, sell_info, initial_trade_amount_usd)
+                        if opportunity: found_opportunities.append(opportunity)
+
+        # --- DEX-CEX & CEX-DEX Opportunities ---
+        for dex_network, dex_quotes_for_network in dex_quotes.items():
+            for cex_platform, cex_prices_for_platform in cex_prices.items():
+                for pair_key, dex_quote_info in dex_quotes_for_network.items():
+                    input_symbol, output_symbol = pair_key.split('_') # e.g., SOL_USDC
+
+                    # We are getting quote for input_symbol -> output_symbol.
+                    # Price of input_symbol on DEX is (outAmount of stablecoin) / (inAmount of asset)
+                    if dex_quote_info and dex_quote_info.get('inAmount') and dex_quote_info.get('outAmount'):
+                        dex_price_of_input_symbol = dex_quote_info["outAmount"] / dex_quote_info["inAmount"]
+                    else:
+                        continue # Skip if DEX quote is invalid
+
+                    cex_asset_price = cex_prices_for_platform.get(input_symbol) # Price of input_symbol on CEX
+
+                    if cex_asset_price:
+                        # Case 1: Buy on DEX, Sell on CEX
+                        buy_info = {"name": dex_network, "type": "DEX", "network": dex_network, "price": dex_price_of_input_symbol}
+                        sell_info = {"name": cex_platform, "type": "CEX", "price": cex_asset_price}
+                        opportunity = await self._calculate_net_profit(input_symbol, buy_info, sell_info, initial_trade_amount_usd)
+                        if opportunity: found_opportunities.append(opportunity)
+
+                        # Case 2: Buy on CEX, Sell on DEX
+                        buy_info = {"name": cex_platform, "type": "CEX", "price": cex_asset_price}
+                        sell_info = {"name": dex_network, "type": "DEX", "network": dex_network, "price": dex_price_of_input_symbol}
+                        opportunity = await self._calculate_net_profit(input_symbol, buy_info, sell_info, initial_trade_amount_usd)
+                        if opportunity: found_opportunities.append(opportunity)
+
+        return found_opportunities
+
+    async def _find_triangular_arbitrage(self, cex_prices: Dict, dex_quotes: Dict) -> List[Dict]:
+        """
+        Finds triangular arbitrage opportunities.
+        This is a complex feature requiring:
+        1. A graph representation of markets/pairs.
+        2. Pathfinding algorithm (e.g., Bellman-Ford variant or BFS/DFS) to find cycles.
+        3. Real-time order book depth to estimate slippage accurately.
+        """
+        self.logger.info("Triangular arbitrage detection is a planned feature and not yet implemented.")
+        return []
+
+    async def _find_cross_chain_dex_dex_arbitrage(self, dex_quotes: Dict) -> List[Dict]:
+        """
+        Finds cross-chain DEX-DEX arbitrage opportunities.
+        This is extremely complex due to:
+        1. Bridge fees and liquidity.
+        2. Time delays across chains.
+        3. Ensuring atomic execution or managing risk for non-atomic trades.
+        """
+        self.logger.info("Cross-chain DEX-DEX arbitrage detection is a planned feature and not yet implemented.")
+        return []
+
+    # Risk Management specific methods (called by main.py or trading_executor)
+    async def check_volatility_and_pause(self, asset_symbol: str, recent_prices: List[float]) -> bool:
+        """
+        Checks if volatility exceeds threshold for a given asset.
+        `recent_prices` should be prices over `auto_pause_volatility_window_min`.
+        """
+        if len(recent_prices) < 2:
+            return False
+        
+        price_change = abs((recent_prices[-1] - recent_prices[0]) / recent_prices[0]) * 100
+        if price_change > self.auto_pause_volatility_pct:
+            self.logger.warning(f"High volatility detected for {asset_symbol}: {price_change:.2f}% change. Auto-pausing bot.")
+            return True
+        return False
+
+    # This method would be used by the TradingExecutor
+    def apply_stop_loss_take_profit(self, trade_details: Dict) -> Dict:
+        """
+        Applies stop-loss/take-profit logic. (Conceptual, actual execution in TradingExecutor).
+        """
+        # This would involve setting actual SL/TP orders on CEXs or monitoring for DEX trades
+        self.logger.debug(f"Applying SL/TP: SL {self.stop_loss_pct*100}%, TP {self.take_profit_pct*100}%")
+        return trade_details # Placeholder
+
+
+2.5. New Module: trading_executor.py (For Automated Trading)
+This new module will handle the actual execution of trades based on discovered opportunities and risk parameters.
+# Create this new file: arbitrage_bot/trading_executor.py
+import asyncio
+from typing import Dict, Any, Optional
+from logger import logger
+from settings_manager import SettingsManager # To get latest settings
+from connectors.cex_connector.binance import Binance # Import specific CEX connectors
+# from connectors.dex_connector.solana_dex import SolanaDex
+# from connectors.dex_connector.evm_dex import EvmDex
+
+class TradingExecutor:
+    def __init__(self, settings: Dict):
+        self.settings = settings
+        self.logger = logger
+        self.cex_clients: Dict[str, Any] = {} # Store initialized CEX API clients
+        self.dex_clients: Dict[str, Any] = {} # Store initialized Web3/DEX clients
+        self._initialize_clients()
+
+    def _initialize_clients(self):
+        """Initializes API clients for CEXs and Web3 instances for DEXs."""
+        self.logger.info("Initializing trading clients...")
+        api_keys = self.settings.get("api_keys", {})
+        
+        # Initialize CEX clients (Binance, etc.)
+        if "BINANCE" in api_keys and api_keys["BINANCE"].get("api_key"):
+            self.cex_clients["BINANCE"] = Binance(self.settings) # Re-use connector for actual trading
+            self.cex_clients["BINANCE"].set_logger(self.logger)
+            # Binance also has specific client for trading, not just price fetching
+            # self.cex_clients["BINANCE_TRADE_CLIENT"] = Client(api_keys["BINANCE"]["api_key"], api_keys["BINANCE"]["secret_key"])
+            self.logger.info("Initialized Binance trading client.")
+        
+        # Initialize DEX clients (Web3 instances, etc.)
+        # This requires private keys for actual transactions, which is sensitive.
+        # For non-custodial wallet integration (MetaMask, Trust Wallet), you'd need the private key
+        # or use a signing mechanism. This is a critical security consideration.
+        
+        # Example for EVM chains (using web3.py for contract interaction)
+        # if "ETHEREUM" in self.settings.get("rpc_urls", {}) and self.settings.get("wallet_integration", {}).get("metamask_private_key"):
+        #     from web3 import Web3
+        #     from eth_account import Account
+        #     from web3.middleware import construct_sign_and_send_raw_middleware
+        #     rpc_url = self.settings["rpc_urls"]["ETHEREUM"][0]
+        #     w3 = Web3(Web3.HTTPProvider(rpc_url))
+        #     private_key = self.settings["wallet_integration"]["metamask_private_key"]
+        #     account = Account.from_key(private_key)
+        #     w3.middleware_onion.add(construct_sign_and_send_raw_middleware(account))
+        #     w3.eth.default_account = account.address
+        #     self.dex_clients["ETHEREUM"] = w3
+        #     self.logger.info("Initialized Ethereum Web3 client for trading.")
+
+    async def execute_trade(self, opportunity: Dict) -> Dict[str, Any]:
+        """
+        Executes an arbitrage trade based on the provided opportunity details.
+        Handles trade splitting, order types, and basic error handling.
+        """
+        self.logger.info(f"Attempting to execute trade for {opportunity['asset']}...")
+        buy_platform = opportunity["buy_platform"]
+        sell_platform = opportunity["sell_platform"]
+        asset = opportunity["asset"]
+        initial_amount_usd = opportunity["initial_amount_usd"] # Amount in USD to trade
+        estimated_asset_amount = opportunity["estimated_asset_amount"] # Calculated asset amount
+
+        # Check if bot is configured for auto-execution
+        if self.settings.get("bot_mode", "Inactive") != "Execution Enabled":
+            self.logger.info("Bot is in Inactive mode. Skipping trade execution.")
+            return {"status": "skipped", "reason": "Bot mode is Inactive"}
+
+        # Dynamic Liquidity Management / Batch Order Execution
+        # If `initial_amount_usd` is large and `liquidity_info` is low for DEX
+        # You would split the order into smaller chunks to minimize slippage.
+        # This requires specific logic for each DEX (e.g., 1inch API for splitting)
+        enable_batch_orders = self.settings.get("order_customization", {}).get("enable_batch_orders", False)
+        if enable_batch_orders and buy_platform["type"] == "DEX":
+            # Implement order splitting logic here
+            self.logger.info(f"Batch order execution enabled. Splitting {asset} trade on {buy_platform['name']}.")
+            # For each sub-order, call _execute_single_leg
+            # This is complex and highly specific to DEX aggregator APIs.
+            pass # Placeholder
+
+        trade_successful = False
+        try:
+            # --- Execute Buy Leg ---
+            buy_result = await self._execute_single_leg(
+                platform_info=buy_platform,
+                action="buy",
+                asset=asset,
+                amount_usd=initial_amount_usd,
+                amount_asset=estimated_asset_amount,
+                price=buy_platform["price"],
+                order_type=self.settings.get("order_customization", {}).get("default_order_type", "Market")
+            )
+            if not buy_result or buy_result.get("status") != "success":
+                self.logger.error(f"Buy leg failed on {buy_platform['name']}: {buy_result.get('reason', 'Unknown')}")
+                return {"status": "failed", "reason": f"Buy leg failed: {buy_result.get('reason', 'Unknown')}"}
+
+            # --- Execute Sell Leg ---
+            sell_result = await self._execute_single_leg(
+                platform_info=sell_platform,
+                action="sell",
+                asset=asset,
+                amount_usd=buy_result.get("actual_amount_usd_spent", initial_amount_usd), # Use actual amount spent if available
+                amount_asset=buy_result.get("actual_amount_asset_bought", estimated_asset_amount),
+                price=sell_platform["price"],
+                order_type=self.settings.get("order_customization", {}).get("default_order_type", "Market")
+            )
+            if not sell_result or sell_result.get("status") != "success":
+                self.logger.error(f"Sell leg failed on {sell_platform['name']}: {sell_result.get('reason', 'Unknown')}")
+                # Implement partial fulfillment/rollback if needed (highly complex)
+                return {"status": "failed", "reason": f"Sell leg failed: {sell_result.get('reason', 'Unknown')}"}
+            
+            # --- Calculate Actual Profit (if possible) ---
+            # This would require actual fill prices from the executed orders
+            actual_profit_usd = sell_result.get("actual_revenue_usd", 0) - buy_result.get("actual_cost_usd", 0)
+            trade_successful = True
+            
+            return {"status": "success", "profit": actual_profit_usd, "details": {"buy": buy_result, "sell": sell_result}}
+
+        except Exception as e:
+            self.logger.error(f"Error during trade execution: {e}", exc_info=True)
+            return {"status": "failed", "reason": str(e)}
+        finally:
+            if not trade_successful:
+                self.logger.info("Trade attempt concluded with failure.")
+
+
+    async def _execute_single_leg(self, platform_info: Dict, action: str, asset: str, amount_usd: float, amount_asset: float, price: float, order_type: str) -> Dict[str, Any]:
+        """
+        Executes a single buy or sell leg on a specific platform.
+        This is a conceptual implementation. Actual API calls would be complex.
+        """
+        platform_name = platform_info["name"]
+        platform_type = platform_info["type"]
+        self.logger.info(f"Executing {action} {amount_asset:.4f} {asset} on {platform_name} ({platform_type})...")
+
+        # Apply Stop-Loss/Take-Profit (Conceptual for order placement)
+        # This would integrate with a separate order management system.
+        # For market orders, SL/TP are typically not placed at trade entry.
+        # For limit/conditional, they would be.
+
+        try:
+            if platform_type == "CEX":
+                client = self.cex_clients.get(platform_name)
+                if not client:
+                    raise ValueError(f"CEX client for {platform_name} not initialized.")
+
+                # Example: Binance trade (using python-binance client)
+                # symbol = f"{asset.upper()}USDT"
+                # if action == "buy":
+                #     order = client.create_order(symbol=symbol, side='BUY', type=order_type.upper(),
+                #                                 quantity=amount_asset)
+                # else: # sell
+                #     order = client.create_order(symbol=symbol, side='SELL', type=order_type.upper(),
+                #                                 quantity=amount_asset)
+                
+                # Mock CEX execution
+                await asyncio.sleep(1) # Simulate API call delay
+                if random.random() < 0.1: # 10% chance of failure
+                    raise Exception("Mock CEX order failed.")
+                
+                fill_price = price * (1 + (random.uniform(-0.001, 0.001) if action == "buy" else random.uniform(-0.001, 0.001)))
+                actual_amount_asset = amount_asset
+                actual_cost_revenue_usd = actual_amount_asset * fill_price
+                
+                self.logger.info(f"CEX {action} order filled at {fill_price:.4f}.")
+                return {"status": "success", "actual_amount_asset_bought": actual_amount_asset if action == "buy" else None,
+                        "actual_amount_usd_spent": actual_cost_revenue_usd if action == "buy" else None,
+                        "actual_revenue_usd": actual_cost_revenue_usd if action == "sell" else None,
+                        "fill_price": fill_price}
+
+            elif platform_type == "DEX":
+                client = self.dex_clients.get(platform_info["network"]) # Get Web3 client for the network
+                if not client:
+                    raise ValueError(f"DEX client for {platform_info['network']} not initialized or private key missing.")
+
+                # This is highly complex. It involves:
+                # 1. Getting token addresses from settings
+                # 2. Approving token spending for router (if not native token)
+                # 3. Calling router contract (Uniswap, PancakeSwap, Jupiter) swap exact tokens for ETH/tokens.
+                # 4. Estimating gas and sending transaction.
+                # 5. Waiting for transaction confirmation.
+                # For 1inch, you'd use their SDK or API for actual swap endpoint.
+
+                # Mock DEX execution
+                await asyncio.sleep(2) # Simulate transaction delay
+                if random.random() < 0.2: # 20% chance of failure
+                    raise Exception("Mock DEX transaction failed.")
+
+                fill_price = price * (1 + (random.uniform(0.002, 0.005) if action == "buy" else random.uniform(-0.002, -0.005))) # Simulate higher slippage
+                actual_amount_asset = amount_asset
+                actual_cost_revenue_usd = actual_amount_asset * fill_price
+
+                # Micro-Arbitrage for Small Capital:
+                # If amount is small, TradingExecutor should prioritize low-fee networks.
+                # This check happens *before* execution, perhaps in arbitrage_detector or main.
+                # But here, we simulate lower gas cost for such networks.
+                # gas_cost_usd = self.settings.get("network_fees", {}).get(platform_info["network"], 0.0)
+                # if gas_cost_usd > self.settings.get("arbitrage_parameters", {}).get("gas_fee_cap_usd", 10.0):
+                #    raise Exception("Exceeded gas fee cap for DEX trade.")
+
+                self.logger.info(f"DEX {action} transaction confirmed at {fill_price:.4f}.")
+                return {"status": "success", "actual_amount_asset_bought": actual_amount_asset if action == "buy" else None,
+                        "actual_amount_usd_spent": actual_cost_revenue_usd if action == "buy" else None,
+                        "actual_revenue_usd": actual_cost_revenue_usd if action == "sell" else None,
+                        "fill_price": fill_price}
+
+            else:
+                raise ValueError(f"Unsupported platform type for trading: {platform_type}")
+
+        except Exception as e:
+            self.logger.error(f"Failed to execute {action} on {platform_name}: {e}", exc_info=True)
+            return {"status": "failed", "reason": str(e)}
+
+
+2.6. connectors/ Updates
+ * base_connector.py: No changes needed if it remains abstract base.
+ * cex_connector/: Each CEX connector (binance.py, coinbase.py, etc.) might need to be extended to include methods for:
+   * get_balance(symbol): To retrieve actual exchange balances for portfolio tracking.
+   * create_order(symbol, side, type, quantity, price=None): For direct trading execution.
+   * get_order_status(order_id): To track pending orders.
+ * dex_connector/: Similar extensions:
+   * get_balance(token_address, wallet_address): For wallet balances.
+   * swap_tokens(from_token_address, to_token_address, amount_in, min_amount_out, private_key): For executing swaps.
+   * get_gas_price(): To dynamically fetch current gas prices.
+   * Non-custodial wallet integration: This is a major security point. TradingExecutor will need the private key or a mechanism to sign transactions via a local wallet (e.g., using web3.py with Account.from_key). Be extremely careful with private keys.
+2.7. utils/constants.py Updates
+# ... (existing constants) ...
+
+# New Arbitrage Types
+ARBITRAGE_TYPES = ["SIMPLE", "TRIANGULAR", "CROSS_CHAIN"]
+
+# For Order Customization
+ORDER_TYPES = ["Market", "Limit", "Conditional"]
+
+# Add more platforms for trading fees if needed
+# All CEX_PLATFORMS are already there
+# All DEX_NETWORKS will likely use an aggregator like 1inch/Jupiter which have a fee.
+# Explicitly list common DEXs for UI options if needed
+COMMON_DEX_PLATFORMS = ["JUPITER", "UNISWAP", "PANCAKESWAP", "TRADERJOE", "QUICKSWAP", "SPOOKYSWAP"]
+
+# Security Statuses
+SECURITY_STATUSES = ["Active", "Warnings", "Alerts"]
+
+
+3. Integration Points (UI <-> Backend)
+ * app.py calls bot_main.start_bot_in_thread() / stop_bot_in_thread(): Initiates/terminates the backend processing.
+ * app.py calls bot_main.get_bot_status(): To update UI buttons.
+ * app.py pulls data from main.py's global variables:
+   * bot_main.get_discovered_opportunities() for the "Live Opportunities" table.
+   * bot_main.get_24h_profit(), get_success_rate(), get_avg_spread(), get_ai_uptime_str() for dashboard metrics.
+   * bot_main.get_portfolio_balance(), get_security_alerts() for header/portfolio.
+ * app.py saves settings via settings_manager.save_settings(): Updates config.json, which main.py should reload periodically or be signaled to.
+ * app.py attaches StreamlitLogHandler to logger.py: For real-time log display.
+ * "Execute" Button: If bot_mode is "Inactive", the "Execute" button in "Arbitrage Monitor" page would trigger a manual execution. This requires a new function in main.py like execute_manual_trade(opportunity_details) that calls TradingExecutor.execute_trade with the specified opportunity.
+4. How It Works - Implementation Details
+ * Bot Mode (main.py): The bot_mode setting in config.json determines if TradingExecutor.execute_trade is called. If "Inactive", it just notifies.
+ * Multi-Level Arbitrage (arbitrage_detector.py):
+   * Simple: Already sketched, CEX-CEX, CEX-DEX, DEX-CEX comparisons.
+   * Triangular: Requires a graph algorithm to find A-B-C-A cycles within a single exchange/DEX aggregator. This is significantly more complex and would need order book depth simulation or real-time order book data.
+   * Cross-Chain Arbitrage (DEX-DEX): Very advanced. Requires integrating with bridge APIs, accounting for bridge fees, and managing the asynchronous nature of cross-chain transfers. Often involves "Flash Loans" or significant capital pre-positioned on multiple chains.
+ * Dynamic Liquidity Management (trading_executor.py): When executing large DEX orders, TradingExecutor would check available liquidity pools and potentially split orders into smaller chunks to execute across multiple pools or over time, to minimize slippage. This needs specific DEX aggregator API knowledge (e.g., 1inch API supports splitting).
+ * Micro-Arbitrage for Small Capital (arbitrage_detector.py, trading_executor.py):
+   * ArbitrageDetector could prioritize opportunities on low-fee networks by applying a higher gas_fee_cap_usd filter specifically for them, or by explicitly ranking them higher if net_profit_usd is similar.
+   * TradingExecutor would be configured to use these low-fee networks.
+ * Intelligent Transaction Routing (trading_executor.py, connectors):
+   * Lowest Gas Fees: EvmDex and SolanaDex would ideally fetch real-time gas prices (e.g., web3.eth.gas_price for EVM, or Solana RPC for priority fees). ArbitrageDetector (or TradingExecutor) would factor this into profit calculations and select the cheapest chain for cross-chain transfers if multiple paths exist.
+   * Speed & Cost: A sophisticated TradingExecutor would have logic to choose between different DEX routers or CEX APIs based on historical fill times and transaction costs.
+ * Customizable Orders (trading_executor.py):
+   * Limit/Market/Conditional: TradingExecutor would use the appropriate CEX API methods or build smart contract interactions for DEXs. "Conditional orders" might require an off-chain oracle or more complex smart contract logic.
+   * Trailing SL/TP: Requires continuous monitoring of the trade's price after execution. For CEXs, you'd update/cancel/create new orders. For DEXs, this is harder and typically done by off-chain bots.
+   * Batch Order Execution: As mentioned under Dynamic Liquidity, splitting large orders.
+ * Advanced Risk Management (arbitrage_detector.py, main.py, trading_executor.py):
+   * SL/TP: Parameters set in config.json, used by ArbitrageDetector for filtering and TradingExecutor for actual order management.
+   * Auto-pause during volatility: main.py would periodically check PriceFetcher data for significant price changes within a window (auto_pause_volatility_pct, auto_pause_volatility_window_min) and call stop_bot_in_thread() if triggered.
+   * Capital allocation limits: ArbitrageDetector (or TradingExecutor) would ensure that a single trade doesn't exceed capital_allocation_limit_pct of the total portfolio (which PortfolioManager would track).
+   * Diversification: ArbitrageDetector would limit the number of active/notified opportunities based on diversification_pairs_count.
+ * Arbitrage Parameters (config.json, arbitrage_detector.py): New fields directly integrated.
+ * Predictive Analytics (main.py, new analytics_dashboard.py, database.py):
+   * Requires a persistent database (e.g., SQLite, PostgreSQL) to store trade_history data.
+   * main.py would log every executed trade (profit, asset, platforms, fees, timestamp).
+   * A new analytics_dashboard.py (or integrated into main.py functions) would query this database to provide aggregated metrics (24h profit, success rate, etc.) for app.py.
+   * Matplotlib/Plotly can be used in app.py to render charts from this data.
+   * CoinGecko/external data integration would involve another API call in PriceFetcher or a dedicated MarketDataFetcher module.
+ * Security (trading_executor.py, connectors):
+   * Non-custodial Wallet: TradingExecutor and DEX connectors would use web3.py to interact with smart contracts, requiring the private key of the user's wallet. Emphasis on security: Store private keys securely (environment variables, encrypted files, or secure wallet integration if building for production).
+   * CEX API Permissions: When creating API keys on exchanges, ensure they only have trading permissions (spot trading, futures trading if applicable), and NO withdrawal access.
+   * Validate Smart Contracts: This is a manual or automated audit process. The bot itself wouldn't "validate" them during runtime, but the developer should use trusted, audited smart contracts. For DEXs, stick to well-known aggregators (1inch, Jupiter) as they handle contract interactions.
+This detailed plan provides a roadmap for turning your vision into a functional bot. Remember to implement and test each feature incrementally. Start with the UI, then the backend logic for new settings, then the core arbitrage types, and finally the more complex features like auto-trading with risk management and multi-level arbitrage.
